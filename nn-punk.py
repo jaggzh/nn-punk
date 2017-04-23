@@ -99,13 +99,19 @@ start_time = time.time()
 abbrs_file = "abbreviations.txt"
 abbrs_re = None # regex for abbreviations
 
-lrate_enh_start = 0.001
-epochs_txt = 10
-samp_per_epoch_txt = 100
-iters = 5
+lrate_enh_start = 0.00001
+epochs_txt = 15
+samp_per_epoch_txt = 200
+iters = 50
 
+# 5 10 20 40 80
+# 7 14 28 56 112
+# Windows like 80, 112
 window = 80
-punk_max = 4
+punk_max = 4 # Not used currently. This is for outputting a set of punct. offsets,
+             # like: (6, 20, ...)
+             # while we are currently outputting a one-hot type, like:
+			 # (0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0... 1 0 0 0 ...)
 actouts=[]  # Activation outputs if viewing layer activations
 
 glob_last_wpunct=None
@@ -258,9 +264,10 @@ def model():
 	#x = Reshape((window,))(x)
 	#if False:
 	if True:
-		x = LeakyReLU(alpha=leakalpha)(x)
-		x = convleaky(x, f, 2)  # 80
-		x = convleaky(x, f, 2)  # 80
+		#x = LeakyReLU(alpha=leakalpha)(x)
+		x = convleaky(x, f, 2)    # 80
+		x = convleaky(x, f, 3)    # 80
+		x = convleaky(x, f, 3)    # 80
 		x = MaxPooling1D(2)(x)
 		x = convleaky(x, f*2, 2)  # 40
 		x = MaxPooling1D(2)(x)
@@ -279,7 +286,7 @@ def model():
 			x = LeakyReLU(alpha=.2)(x)
 		if True:  # use if doing onehot type list of punct. locations
 		          #  e.g. (0 0 1 0 0 0 0 0 0 1 0 0 0 0 0...)
-			x = Dense(window, activation='tanh')(x)
+			x = Dense(window, activation='sigmoid')(x)
 			x = Reshape((window,))(x)
 	#show_shape(inputs, x)
 	output = x
@@ -376,6 +383,9 @@ def train(model=None, itercount=0):
 		generator = generate_texts('train')
 		generator_val = generate_texts('val')
 
+		pf("Total snippets:", total_sets)
+		pf("Total snippets w/ punc:", total_wpunc)
+		pf("Total snippets w/o punc:", total_wopunc)
 		pf("Calling fit_generator")
 		model.fit_generator(
 				generator,
@@ -388,9 +398,6 @@ def train(model=None, itercount=0):
 			)
 		pf("Saving weights")
 		save_weights(model, weight_store_txt)
-		pf("Total snippets:", total_sets)
-		pf("Total snippets w/ punc:", total_wpunc)
-		pf("Total snippets w/o punc:", total_wopunc)
 
 def save_weights(model, fn):
 	model.save_weights(fn)
