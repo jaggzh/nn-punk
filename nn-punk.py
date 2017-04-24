@@ -9,7 +9,7 @@ from hyperas.distributions import choice, uniform, conditional
 import keras
 import errno
 from keras.models import Sequential, Model
-from keras.layers import Dense, Reshape, UpSampling2D, Flatten, Conv1D, MaxPooling1D, Input, ZeroPadding1D, Activation, Dropout
+from keras.layers import Dense, Reshape, UpSampling2D, Flatten, Conv1D, MaxPooling1D, Input, ZeroPadding1D, Activation, Dropout, Embedding, Permute
 from keras.layers.merge import Concatenate
 #from keras.layers import Deconvolution2D
 from keras.preprocessing.image import ImageDataGenerator, array_to_img, img_to_array, load_img
@@ -110,7 +110,7 @@ iters = 50
 window = 80
 punk_max = 4 # Not used currently. This is for outputting a set of punct. offsets,
              # like: (6, 20, ...)
-             # while we are currently outputting a one-hot type, like:
+             # while we are currently outputting an array with 1's at the offsets.
 			 # (0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0... 1 0 0 0 ...)
 actouts=[]  # Activation outputs if viewing layer activations
 
@@ -256,18 +256,19 @@ def model():
 	leakalpha=.2
 
 	x = inputs = Input(shape=(window, 1), name='gen_input', dtype='float32')
-	f=64
 	#x = Flatten()(x)
 	#x = Dense(4096)(x)
 	#x = Dense(256)(x)
 	#x = Dense(window)(x)
 	#x = Reshape((window,))(x)
 	#if False:
+	f=100
 	if True:
 		#x = LeakyReLU(alpha=leakalpha)(x)
-		x = convleaky(x, f, 2)    # 80
-		x = convleaky(x, f, 3)    # 80
-		x = convleaky(x, f, 3)    # 80
+		#x = Reshape((window,))(x)
+		#x = Embedding(256, 1, input_length=window)(x)
+		x = convleaky(x, f, 5)    # 80
+		x = convleaky(x, f, 5)    # 80
 		x = MaxPooling1D(2)(x)
 		x = convleaky(x, f*2, 2)  # 40
 		x = MaxPooling1D(2)(x)
@@ -276,18 +277,12 @@ def model():
 		x = convleaky(x, f*8, 2)  # 10
 		x = MaxPooling1D(2)(x)
 		x = convleaky(x, f*16, 2)  # 5
+		x = MaxPooling1D(2)(x)
+		x = convleaky(x, f*32, 2)  # 5
 		x = Flatten()(x)
 		x = Dense(1024*3)(x)
-		#x = Dense(256, activation=act)(x)
-		if False: # Use if doing short list of punct. locations
-		          #  e.g: (3, 10, 0, 0, 0)
-			x = Dense(punk_max)(x)
-			x = Reshape((punk_max,))(x)
-			x = LeakyReLU(alpha=.2)(x)
-		if True:  # use if doing onehot type list of punct. locations
-		          #  e.g. (0 0 1 0 0 0 0 0 0 1 0 0 0 0 0...)
-			x = Dense(window, activation='sigmoid')(x)
-			x = Reshape((window,))(x)
+		x = Dense(window, activation='sigmoid')(x)
+		x = Reshape((window,))(x)
 	#show_shape(inputs, x)
 	output = x
 	actlayers = actmodels = ""
@@ -304,6 +299,7 @@ def model():
 	opt = 'sgd'
 	opt = adam_opt_gen
 	loss = 'categorical_crossentropy'
+	loss = 'mae'
 
 	actmodels.compile(
 			loss=loss,
