@@ -45,14 +45,27 @@ def aseq_norm(seq, i): # Takes sequence and a value from [0-1]
 # outputs colorized letters based on corresponding same-length
 # list of values, using sequence codes from aseq
 # skips first color (being too dark) by using aseq_norm()
-def str_colorize(s, values, aseq):
+# s:      String input (might work with anything where s[i] is printable)
+# values: List of numerical values. Same length as s.
+#         These are the magnitudes of the colors
+#         -- the range is calculated linearly between min() and max()
+# aseq:   The ansi color sequence (ex. aseq_rb). See those in this file.
+# bg=True:  To set background instead of fg. (Default: False)
+# color:  Optionally set a fixed color for fg or bg
+#         Use the color variables from this file, like:
+#         red, bred (brightred), bgred, etc.
+def str_colorize(s, values, aseq, bg=False, color=None):
 	minv = min( values )
 	maxv = max( values )
 	for i in range(len(s)):
 		val = values[i]
-		norm = (val-minv)/(maxv - minv)
+		norm = (float(val)-minv)/(maxv - minv)
 		ansival=aseq_norm(aseq, norm)
-		ansistr=a256fg(ansival)
+		if not color == None: print(color, end='')
+		if bg:
+			ansistr=a256bg(ansival)
+		else:
+			ansistr=a256fg(ansival)
 		print(ansistr, s[i], sep='', end='')
 	print(rst)
 
