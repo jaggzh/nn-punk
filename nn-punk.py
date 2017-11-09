@@ -31,11 +31,14 @@ from keras.callbacks import EarlyStopping
 import shutil
 from keras import backend as K
 from ansi import *
-from utils import * # load_abbreviations_re():
+import utils # get_filelen load_abbreviations_re():
 import cPickle as pickle
 import os
 
 #from seya.layers.attention import SpatialTransformer, ST2
+snipverbose = 1
+snipverbose = 2
+snipverbose = 0
 
 def getargs():
 	parser = argparse.ArgumentParser(description='Page undeformer')
@@ -91,15 +94,16 @@ save_weight_secs = 30
 start_time = time.time()
 abbrs_re = None # regex for abbreviations
 
-lrate_enh_start = 0.001
-epochs_txt = 20
-samp_per_epoch_txt = 20000
+lrate_enh_start = 0.0001
+epochs_txt = 100
+samp_per_epoch_txt = 1000
 iters = 50
 
 # 5 10 20 40 80
 # 7 14 28 56 112
 # Windows like 80, 112
 window = 17
+slide = 2
 punk_max = 4 # Not used currently. This is for outputting a set of punct. offsets,
              # like: (6, 20, ...)
              # while we are currently outputting an array with 1's at the offsets.
@@ -107,6 +111,11 @@ punk_max = 4 # Not used currently. This is for outputting a set of punct. offset
 actouts=[]  # Activation outputs if viewing layer activations
 
 glob_last_wpunct=None
+
+get_snip_last_fn = None
+get_snip_last_flen = None
+get_snip_last_f = None
+
 
 # Stats
 total_sets = total_wpunc = total_wopunc = 0
@@ -185,7 +194,7 @@ def init():
 
 	load_text_dirs()
 	global abbrs_re
-	abbrs_re = load_abbreviations_re()
+	abbrs_re = utils.load_abbreviations_re()
 
 	numpy.set_printoptions(edgeitems=100)
 
@@ -265,7 +274,8 @@ def model():
 		x = Reshape((window,))(x)
 		x = Embedding(charset_in, charset_out, input_length=window)(x)
 		x = LSTM(window*charset_out, dropout=0.2, recurrent_dropout=0.2)(x)
-		x = Dense(window, activation='sigmoid')(x)
+		x = Dense(window)(x)
+		x = Dense(window, activation='tanh')(x)
 		#x = LeakyReLU(alpha=.2)(x)
 		#x = Reshape((window,))(x)
 #		x = convleaky(x, 50, 1, track_list=trackers, name='c1_1')    # 80
@@ -297,7 +307,7 @@ def model():
 	actmodels = Model(inputs=[inputs], outputs=actlayers)
 	lrate = lrate_enh_start
 	epochs = epochs_txt
-	decay = 1/epochs
+	decay = .01/epochs
 	adam_opt_gen=Adam(lr=lrate, beta_1=0.9, beta_2=0.999, epsilon=1e-08, decay=decay)
 	opt = 'sgd'
 	opt = adam_opt_gen
@@ -423,26 +433,41 @@ def save_weights(model, fn):
 
 def prep_snippet_in(s):
 	global glob_last_wpunct
-	snipverbose = 2
-	snipverbose = 1
-	snipverbose = 0
+	ext = 1.0 # Extend view ratio: ex. 1.2 to see a bit more sentence
 	if snipverbose > 1: pfp("String: {{", whi, s, rst, "}}")
 	origs = s
-	p = re.compile('^\w+\W'); s = p.sub("", s)  # Strip initial word (part)
-	p = re.compile('^\W+\s*'); s = p.sub("", s)  # Strip non-word chars
+	# p = re.compile('^\w+\W'); s = p.sub("", s)  # Strip initial word (part)
+	# p = re.compile('^\W+\s*'); s = p.sub("", s)  # Strip non-word chars
 	s = s.lower()
-	# White-out(tm) punctuation and symbols
-	p = re.compile('[^.!?a-z0-9 ]'); s = p.sub(" ", s)  # .!? should match below
-	p = re.compile('\s+'); s = p.sub(" ", s)    # Replace all spaces with single
-	s = abbrs_re.sub('\\1', s)                         #   clear . after abbreviations
+	## White-out(tm) unwanted symbols (leaving punctuation and letres)
+	s = re.sub(r'[^.!?a-z0-9 ]', " ", s)  # .!? should match below
+	# p = re.compile('\s+'); s = p.sub(" ", s)    # Replace all spaces with single
+
+	#####################################
+	## ABBREVIATION'S PERIODS GET WHITED OUT
+	s = abbrs_re.sub('\\1 ', s)        #   clear . after abbreviations
 	#pfp(" After: {{", yel, s, rst, "}}")
-	if snipverbose > 0: pfp("  With punct:", bcya, "\n", s[0:int(window*1.2)], rst)
-	glob_last_wpunct = s[:int(window*1.2)]
-	p = re.compile('(\S)\s+[.?!]\s+'); s = p.sub('\\1.', s)   # should match above
-	p = re.compile('[.?!]\s+'); s = p.sub(".", s)   # should match above
-	p = re.compile('[.?!]')                         # should match above
+	if snipverbose > 0:
+		pfp("       W punct: {{", bcya, s, rst, "}}")
+	
+	#####################################
+	## RETAIN COPY OF PUNCTUTED TEXT
+	glob_last_wpunct = s[:int(window*ext)]
+
+	#####################################
+	## CLEAR OUT OUR COPY FOR UNPUNCTUATED
+	# First: change all punctuation to periods
+	#   The first one is when spaces are both sides I don't recall why.
+	#   It might have been due to us collapsing the old version, but we're
+	#   keeping string length intact now so this might not be necessary.
+	s = re.sub('(\S\s+)[.?!](\s+)', '\\1.\2', s)
+	#   The second is remaining punct that's followed by spaces
+	s = re.sub('[.?!](\s+)', '.\\1', s)
+	# Now, everything is wanted letters/numbers and periods.
+	# But we don't remove the periods yet until we get their positions
 
 	# Find and store punctuation offsets
+	p = re.compile('[.!?]')
 	starts = [i for i in p.finditer(s)]
 	y = numpy.zeros(window)
 	i=0
@@ -462,13 +487,13 @@ def prep_snippet_in(s):
 	else:
 		total_wopunc += 1
 	# White-out that earlier match (the EOL punctuation)
-	s = p.sub(" ", s)
+	s = re.sub(r'[.?!]', " ", s) # I think by now we only have periods, but whatevz
 	if snipverbose:
-		pfp(" X (w/o punct):", yel, "\n", s[0:int(window*1.1)], rst) # crop for display
+		pfp(" X (w/o punct): {{", yel, s, rst, "}}") # crop 4 display
 	s = s[0:window]
 	s = s.ljust(window)  # pad with spaces
 	
-	#pfp(" After: {{", yel, s, rst, "}}")
+	if snipverbose > 0: pfp("         After: {{", yel, s, rst, "}}")
 	s = numpy.fromstring(s, dtype='uint8') # need int8 here to get the chars one at a time
 	s = s.astype(numpy.float32)
 	#s = s/255
@@ -498,27 +523,45 @@ def prep_snippet_in(s):
 		#numpy.zeros((1,80,10))
 	]
 	return s, y, len(starts)
-def get_snippet(fn):
+def get_snippet(fn, rand=False, offset=None, window=None):
+	global get_snip_last_fn
+	global get_snip_last_flen
+	global get_snip_last_f
+	if not rand and offset is None:
+		raise ValueError("Either rand= or offset= must be specified")
+	if rand and offset is not None:
+		raise ValueError("Both rand= and offset= cannot be specified")
 	try:
-		fstat = os.stat(fn)
-		flen = fstat.st_size
-		if flen < window:
-			raise ValueError("File " + fn + " is too short: " + str(flen) + "<" + str(window))
-		start = randint(0, flen-(window*2))  # we might not get a last phrase(s) here
+		if get_snip_last_fn == fn:
+			flen = get_snip_last_flen
+			f = get_snip_last_f
+		else:
+			if get_snip_last_f is not None: get_snip_last_f.close()
+			flen = utils.get_filelen(fn)
+			if flen < window:
+				raise ValueError(
+					"File " + fn +
+					" is too short: " + str(flen) + "<" + str(window))
+			f = open(fn, "rb")
+		if rand:
+			start = randint(0, flen-(window*2))  # we might not get a last phrase(s) here
+		else: # if offset
+			start = offset
 		#pf("File:", fn)
-		f = open(fn, "rb")
 		f.seek(start)
 		# Read twice the amount so, hopefully, we can find word boundaries
 		# and strip punctuation, and have window (128) chars left
-		data = f.read(window*2)
-		f.close()
+		data = f.read(int(window*1.2))
 		string, y, punccnt = prep_snippet_in(data)
 		#pf("Punct locs  :", punclocs)
 		#pf("np len int8:", string.shape)
 		#pf("np len float32:", string.shape)
 		#pf("Shape x:", string.shape)
 		#pf(string)
-		return string, y, punccnt
+		get_snip_last_fn = fn
+		get_snip_last_flen = flen
+		get_snip_last_f = f
+		return string, y, punccnt, flen
 	except:
 		raise
 
@@ -565,11 +608,22 @@ def generate_texts_flow(setname): # setname='train','val','test'
 
 def generate_texts_rnd(setname): # setname='train','val','test'
 	global lastfname
+	restart = 1
+	offset = 0 # We currently start at the beginning each time we change files
+	flen = None
 	while True:
-		iset = txtsets[setname]
-		iidx = randint(0, len(iset)-1)
+		if restart:
+			iset = txtsets[setname]
+			iidx = randint(0, len(iset)-1)
+			restart = 0
+		else:
+			offset += slide
+			if offset >= flen-window:
+				restart = 1
+				continue
 		lastfname = iset[iidx]
-		x, y, punccnt = get_snippet(lastfname)
+		x, y, punccnt, flen = \
+			get_snippet(lastfname, offset=offset, window=window)
 		#if punccnt > 2:
 			#pf("X:", x)
 			#pf("Y:", y)
