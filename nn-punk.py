@@ -9,7 +9,7 @@ from hyperas.distributions import choice, uniform, conditional
 import keras
 import errno
 from keras.models import Sequential, Model
-from keras.layers import Dense, Reshape, UpSampling2D, Flatten, Conv1D, MaxPooling1D, Input, ZeroPadding1D, Activation, Dropout, Embedding, Permute
+from keras.layers import Dense, Reshape, UpSampling2D, Flatten, Conv1D, MaxPooling1D, Input, ZeroPadding1D, Activation, Dropout, Embedding, Permute, LSTM
 from keras.layers.merge import Concatenate
 #from keras.layers import Deconvolution2D
 from keras.preprocessing.image import ImageDataGenerator, array_to_img, img_to_array, load_img
@@ -17,6 +17,7 @@ from keras.utils.layer_utils import print_summary
 from keras.layers.advanced_activations import LeakyReLU
 from keras.optimizers import Adam, SGD
 from keras.callbacks import ModelCheckpoint, LambdaCallback
+from keras.utils.np_utils import to_categorical
 import numpy as numpy
 import sys
 from os import listdir
@@ -30,18 +31,10 @@ from keras.callbacks import EarlyStopping
 import shutil
 from keras import backend as K
 from ansi import *
+from utils import * # load_abbreviations_re():
 import cPickle as pickle
 import os
 
-def load_abbreviations_re():
-	with open(abbrs_file) as f:
-		content = f.readlines()
-	content = [x.strip() for x in content] 
-	#pf(content)
-	abbr_re = "(" + '|'.join(content) + ")\."
-	#pf(abbr_re)
-	#exit(0)
-	return re.compile(abbr_re)
 #from seya.layers.attention import SpatialTransformer, ST2
 
 def getargs():
@@ -96,18 +89,17 @@ setname_train = 'train'
 last_epoch_time = time.time()
 save_weight_secs = 30
 start_time = time.time()
-abbrs_file = "abbreviations.txt"
 abbrs_re = None # regex for abbreviations
 
-lrate_enh_start = 0.00001
-epochs_txt = 15
-samp_per_epoch_txt = 200
+lrate_enh_start = 0.001
+epochs_txt = 20
+samp_per_epoch_txt = 20000
 iters = 50
 
 # 5 10 20 40 80
 # 7 14 28 56 112
 # Windows like 80, 112
-window = 80
+window = 17
 punk_max = 4 # Not used currently. This is for outputting a set of punct. offsets,
              # like: (6, 20, ...)
              # while we are currently outputting an array with 1's at the offsets.
@@ -226,6 +218,7 @@ def track_add(track_list, name, layer):
 class SaveWeights(keras.callbacks.Callback):
 	def on_epoch_end(self, epoch, logs={}):
 		global last_epoch_time
+		sleep(.5)
 		if time.time()-last_epoch_time > save_weight_secs:
 			last_epoch_time = time.time()
 			pf("Saving weights, timed (", save_weight_secs, "s).  Time elapsed: ",
@@ -257,7 +250,7 @@ def model():
 	leakalpha=.2
 
 	x = inputs = Input(shape=(window, 1), name='gen_input', dtype='float32')
-	track_add(trackers, 'gen_input', x)
+	#track_add(trackers, 'gen_input', x)
 	#x = Flatten()(x)
 	#x = Dense(4096)(x)
 	#x = Dense(256)(x)
@@ -267,24 +260,31 @@ def model():
 	f=10
 	if True:
 		#x = LeakyReLU(alpha=leakalpha)(x)
-		#x = Reshape((window,))(x)
-		#x = Embedding(256, 1, input_length=window)(x)
-		x = convleaky(x, f, 5, track_list=trackers, name='c1_1', act=act)    # 80
-		x = convleaky(x, f, 5, track_list=trackers, name='c1_2', act=act)    # 80
-		x = MaxPooling1D(2)(x)
-		x = convleaky(x, f*2, 2, act=act)  # 40
-		x = MaxPooling1D(2)(x)
-		x = convleaky(x, f*4, 2, act=act)  # 20
-		x = MaxPooling1D(2)(x)
-		x = convleaky(x, f*8, 2, act=act)  # 10
-		x = MaxPooling1D(2)(x)
-		x = convleaky(x, f*16, 2, act=act)  # 5
-		x = MaxPooling1D(2)(x)
-		x = convleaky(x, f*32, 2, act=act)  # 5
-		x = Flatten()(x)
-		x = Dense(1024*3)(x)
-		x = Dense(window, activation='sigmoid')(x)
+		charset_in=256   # latin-1?
+		charset_out=62  # Enough?
 		x = Reshape((window,))(x)
+		x = Embedding(charset_in, charset_out, input_length=window)(x)
+		x = LSTM(window*charset_out, dropout=0.2, recurrent_dropout=0.2)(x)
+		x = Dense(window, activation='sigmoid')(x)
+		#x = LeakyReLU(alpha=.2)(x)
+		#x = Reshape((window,))(x)
+#		x = convleaky(x, 50, 1, track_list=trackers, name='c1_1')    # 80
+#		x = convleaky(x, 50, 1, track_list=trackers, name='c1_2', act=act)
+#		x = convleaky(x, f, 5, track_list=trackers, name='c1_3', act=act)
+#		x = MaxPooling1D(2)(x)
+#		x = convleaky(x, f*2, 2, act=act)  # 40
+#		x = MaxPooling1D(2)(x)
+#		x = convleaky(x, f*4, 2, act=act)  # 20
+#		x = MaxPooling1D(2)(x)
+#		x = convleaky(x, f*8, 2, act=act)  # 10
+#		x = MaxPooling1D(2)(x)
+#		x = convleaky(x, f*16, 2, act=act)  # 5
+#		x = MaxPooling1D(2)(x)
+#		x = convleaky(x, f*32, 2, act=act)  # 5
+#		x = Flatten()(x)
+#		#x = Dense(1024*3, activation=act)(x)
+#		x = Dense(window, activation='sigmoid')(x)
+#		x = Reshape((window,))(x)
 	#show_shape(inputs, x)
 	output = x
 	actmodels = ""
@@ -298,18 +298,19 @@ def model():
 	lrate = lrate_enh_start
 	epochs = epochs_txt
 	decay = 1/epochs
-	adam_opt_gen=Adam(lr=lrate, beta_1=0.6, beta_2=0.999, epsilon=1e-08, decay=decay)
+	adam_opt_gen=Adam(lr=lrate, beta_1=0.9, beta_2=0.999, epsilon=1e-08, decay=decay)
 	opt = 'sgd'
 	opt = adam_opt_gen
+	loss = 'binary_crossentropy'
 	loss = 'categorical_crossentropy'
-	loss = 'mae'
 
 	pf("Actmodels Model:", actmodels)
 	actmodels.compile(
 			loss=loss,
 			loss_weights=actlosses,
-			optimizer='adam',
-			metrics=['accuracy'],
+			optimizer=opt,
+			#metrics=['accuracy'],
+			metrics=['categorical_accuracy'],
 		)
 
 	#pf("final prediction: ", sep='', end=''); show_shape(inputs, x)
@@ -338,7 +339,7 @@ def train(model=None, itercount=0):
 	#if 1 or (itercount>0 or preview):
 	#if 0 and (itercount>0 or preview):
 	if itercount>0 or preview:
-		generator = generate_texts('test')
+		generator = generate_texts_rnd('test')
 		for i in range(0,5):
 			x, y = next(generator)
 			#pf(bred, "X is ", x, rst)
@@ -358,27 +359,25 @@ def train(model=None, itercount=0):
 			s = arr1_to_sentence(x[0])
 			pfp("  Pred sentence input (x):\n", s)
 
-			lyr_c1_1_out = pred[2][0] # Output#2, for the first of batch (0)
-			for f in range(len(lyr_c1_1_out[0])):  # f = 0..filter count
-				lyr_c1_1_out = pred[2][0] # Output#2, for the first of batch (0)
-				ltr_values = lyr_c1_1_out[:,f]
-				str_colorize(s, ltr_values, aseq_gb)
-
-			#lyr_c1_2_out = pred[3][0] # Output#2, for the first of batch (0)
-			#ltr_values = lyr_c1_2_out[:,f]
-			#str_colorize(s, ltr_values, aseq_gb)
+			#lyr_c1_1_out = pred[2][0] # Output#2, for the first of batch (0)
+			#for f in range(len(lyr_c1_1_out[0])):  # f = 0..filter count
+			#	lyr_c1_1_out = pred[2][0] # Output#2, for the first of batch (0)
+			#	ltr_values = lyr_c1_1_out[:,f]
+			#	str_colorize(s, ltr_values, aseq_gb)
 
 			pfpl("  Y gndtrth : ")
 			[ pfpl(n) for n in y[0][0].astype(numpy.uint8)]
-			pf("")
 
 			pfpl("  Y pred    : ")
-			[ pfpl(n) for n in pred[0][0].astype(numpy.uint8)]
-			pf("")
+			#pf(pred[0])
+			#[ pfpl(n) for n in pred[0][0].astype(numpy.uint8)]
+			#pf("")
 
-			for loc in range(len(pred[0][0])-1, -1, -1):
-				val = int(pred[0][0][loc]+.2)  # Add .2 for "close to 1 (true)"
-				#pf("pred loc:", val)
+			for loc in range(len(pred[0])-1, -1, -1):
+				#pf("pred loc:", loc)
+				#pf("pred[0] len:", len(pred[0][0]))
+				#pf("pred[0]:", pred[0][0])
+				val = int(pred[0][int(loc)]+.2)  # Add .2 for "close to 1 (true)"
 				if val: # true == insert space
 					s = s[:loc+1] + '/' + s[loc+2:] # use if replacing
 					#s = s[:loc+1] + '/' + s[loc+1:] # use if inserting
@@ -398,8 +397,8 @@ def train(model=None, itercount=0):
 		fit_start_time = time.time()
 		last_epoch_time = time.time()
 
-		generator = generate_texts('train')
-		generator_val = generate_texts('val')
+		generator = generate_texts_rnd('train')
+		generator_val = generate_texts_rnd('val')
 
 		pf("Total snippets:", total_sets)
 		pf("Total snippets w/ punc:", total_wpunc)
@@ -424,9 +423,10 @@ def save_weights(model, fn):
 
 def prep_snippet_in(s):
 	global glob_last_wpunct
-	snipverbose = True
-	snipverbose = False
-	#if snipverbose: pfp("String: {{", whi, s, rst, "}}")
+	snipverbose = 2
+	snipverbose = 1
+	snipverbose = 0
+	if snipverbose > 1: pfp("String: {{", whi, s, rst, "}}")
 	origs = s
 	p = re.compile('^\w+\W'); s = p.sub("", s)  # Strip initial word (part)
 	p = re.compile('^\W+\s*'); s = p.sub("", s)  # Strip non-word chars
@@ -436,7 +436,7 @@ def prep_snippet_in(s):
 	p = re.compile('\s+'); s = p.sub(" ", s)    # Replace all spaces with single
 	s = abbrs_re.sub('\\1', s)                         #   clear . after abbreviations
 	#pfp(" After: {{", yel, s, rst, "}}")
-	if snipverbose: pfp("  With punct:", bcya, "\n", s[0:int(window*1.2)], rst)
+	if snipverbose > 0: pfp("  With punct:", bcya, "\n", s[0:int(window*1.2)], rst)
 	glob_last_wpunct = s[:int(window*1.2)]
 	p = re.compile('(\S)\s+[.?!]\s+'); s = p.sub('\\1.', s)   # should match above
 	p = re.compile('[.?!]\s+'); s = p.sub(".", s)   # should match above
@@ -450,10 +450,11 @@ def prep_snippet_in(s):
 	for start in (starts):
 		st = start.start()
 		if st < window:
-			if snipverbose: pf("  Punc found at:", st-i)
+			if snipverbose > 1: pf("  Punc found at:", st-i)
 			start_idx.append(st-i)
 			y[st-1] = 1.0
 			#i += 1
+			break # only using 1 right now
 	global total_sets, total_wpunc, total_wopunc
 	total_sets += 1
 	if len(starts):
@@ -463,11 +464,10 @@ def prep_snippet_in(s):
 	# White-out that earlier match (the EOL punctuation)
 	s = p.sub(" ", s)
 	if snipverbose:
-		pfp("  Without punct:", yel, "\n", s[0:int(window*1.1)], rst) # crop for display
+		pfp(" X (w/o punct):", yel, "\n", s[0:int(window*1.1)], rst) # crop for display
 	s = s[0:window]
 	s = s.ljust(window)  # pad with spaces
 	
-
 	#pfp(" After: {{", yel, s, rst, "}}")
 	s = numpy.fromstring(s, dtype='uint8') # need int8 here to get the chars one at a time
 	s = s.astype(numpy.float32)
@@ -478,21 +478,26 @@ def prep_snippet_in(s):
 	start_idx.extend([0] * (punk_max - len(start_idx)))
 	start_idx = numpy.asarray(start_idx, dtype='float32')
 	#pf("Cleaned S:", yel, cleans[:140], rst)
-	if snipverbose: pf("Indexes       :", start_idx)
+	#if snipverbose: pf("Indexes       :", start_idx)
 	start_idx = start_idx / window
 	#pf("Indexes scaled:", start_idx)
 	start_idx = start_idx.reshape((1,punk_max))
 	#pf("Orig S:", bgre, origs[:150], rst)
 	#pf("Punk locs::", bcya, start_idx, rst)
 	#pf("shhh", start_idx.shape)
-	if snipverbose: pf("")
+	#if snipverbose: pf("")
 	#return s, start_idx
 	y = y.reshape((1,window))
 	#if snipverbose: pf("String        :", s)
-	if snipverbose: pf("Indexes       :", y)
+	if snipverbose: pf("Y            :", y)
 	#if snipverbose: pf("Indexes shape :", y.shape)
-	y = [ y, numpy.zeros((1,80,1)), numpy.zeros((1,80,10)), numpy.zeros((1,80,10)) ]
-	return s, y
+	y = [ y,
+		#numpy.zeros((1,80,1)),
+		#numpy.zeros((1,80,50)),
+		#numpy.zeros((1,80,50)),
+		#numpy.zeros((1,80,10))
+	]
+	return s, y, len(starts)
 def get_snippet(fn):
 	try:
 		fstat = os.stat(fn)
@@ -507,26 +512,68 @@ def get_snippet(fn):
 		# and strip punctuation, and have window (128) chars left
 		data = f.read(window*2)
 		f.close()
-		string,punclocs = prep_snippet_in(data)
+		string, y, punccnt = prep_snippet_in(data)
 		#pf("Punct locs  :", punclocs)
 		#pf("np len int8:", string.shape)
 		#pf("np len float32:", string.shape)
 		#pf("Shape x:", string.shape)
 		#pf(string)
-		return string,punclocs
+		return string, y, punccnt
 	except:
 		raise
 
-def generate_texts(setname): # setname='train','val','test'
+class SnippetFlow(object):
+    def __init__(self, offset):
+        self.offset = offset
+
+    def __call__(self):
+		try:
+			fstat = os.stat(fn)
+			flen = fstat.st_size
+			if flen < window:
+				raise ValueError("File " + fn + " is too short: " + str(flen) + "<" + str(window))
+			start = randint(0, flen-(window*2))  # we might not get a last phrase(s) here
+			#pf("File:", fn)
+			f = open(fn, "rb")
+			f.seek(start)
+			# Read twice the amount so, hopefully, we can find word boundaries
+			# and strip punctuation, and have window (128) chars left
+			data = f.read(window*2)
+			f.close()
+			string, y, punccnt = prep_snippet_in(data)
+			return string, y, punccnt
+		except:
+			raise
+
+def generate_texts_flow(setname): # setname='train','val','test'
+	global lastfname
+	global lastfname_switch
+	lastfname = None
+	while True:
+		iset = txtsets[setname]
+		if lastfname == None or randint(100) < 20:
+			iidx = randint(0, len(iset)-1)
+			lastfname = iset[iidx]
+			lastfname_switch = True
+		x, y, punccnt = get_snippet_flow(lastfname, lastfname_switch)
+		lastfname_switch = False
+		#if punccnt > 2:
+			#pf("X:", x)
+			#pf("Y:", y)
+			#pf("Ys:", y.shape)
+		yield x, y
+
+def generate_texts_rnd(setname): # setname='train','val','test'
 	global lastfname
 	while True:
 		iset = txtsets[setname]
 		iidx = randint(0, len(iset)-1)
 		lastfname = iset[iidx]
-		x, y = get_snippet(iset[iidx])
-		#pf("X:", x)
-		#pf("Y:", y)
-		#pf("Ys:", y.shape)
+		x, y, punccnt = get_snippet(lastfname)
+		#if punccnt > 2:
+			#pf("X:", x)
+			#pf("Y:", y)
+			#pf("Ys:", y.shape)
 		yield x, y
 
 init()
