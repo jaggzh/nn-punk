@@ -18,7 +18,7 @@ from keras.layers.advanced_activations import LeakyReLU
 from keras.optimizers import Adam, SGD
 from keras.callbacks import ModelCheckpoint, LambdaCallback
 from keras.utils.np_utils import to_categorical
-import numpy as numpy
+import numpy as np
 import sys
 from os import listdir
 from os.path import isdir, isfile, islink, join
@@ -34,11 +34,15 @@ from ansi import *
 import utils # get_filelen load_abbreviations_re():
 import cPickle as pickle
 import os
+import ipdb as pdb
+debug=1
 
 #from seya.layers.attention import SpatialTransformer, ST2
-snipverbose = 1
 snipverbose = 2
 snipverbose = 0
+snipverbose = 1
+
+train_generator = test_generator = val_generator = None
 
 def getargs():
 	parser = argparse.ArgumentParser(description='Page undeformer')
@@ -90,20 +94,26 @@ setname_val = 'val'
 setname_train = 'train'
 
 last_epoch_time = time.time()
-save_weight_secs = 30
+save_weight_secs = 20
 start_time = time.time()
 abbrs_re = None # regex for abbreviations
 
 lrate_enh_start = 0.0001
-epochs_txt = 100
-samp_per_epoch_txt = 1000
-iters = 50
+epochs_txt = 20
+samp_per_epoch_txt = 3000
+train_pred_iters = 200                   # 
+
+if debug:
+	lrate_enh_start = 0.000001
+	epochs_txt = 4
+	samp_per_epoch_txt = 300
 
 # 5 10 20 40 80
 # 7 14 28 56 112
 # Windows like 80, 112
 window = 17
-slide = 2
+window_stride = window
+reset_at_samps = int(300/window)
 punk_max = 4 # Not used currently. This is for outputting a set of punct. offsets,
              # like: (6, 20, ...)
              # while we are currently outputting an array with 1's at the offsets.
@@ -176,18 +186,18 @@ def load_text_dirs():
 	e = cnt
 	txtsets['train'] = txtall[s : e-1]
 
-	pf(yel, "Loaded text sets:", len(txtsets['train']), rst)
-	pf(gre, "Test text sets:", len(txtsets['test']), rst)
+	pf(yel, "Loaded training sets:", len(txtsets['train']), rst)
+	pf(gre, "      Test text sets:", len(txtsets['test']), rst)
 	pf(blu, "Validation text sets:", len(txtsets['val']), rst)
 
 def init():
 	# fix random seed for reproducibility
 	global termwidth, termheight
 	termwidth, termheight = get_linux_terminal()
-	seed = 16
-	random.seed(seed)
-	numpy.random.seed(seed)
-	numpy.set_printoptions(threshold=64, linewidth=termwidth-1, edgeitems=3)
+	#seed = 16
+	#random.seed(seed)
+	#np.random.seed(seed)
+	np.set_printoptions(threshold=64, linewidth=termwidth-1, edgeitems=3)
 
 	global checkpoint_epoch
 	checkpoint_epoch = SaveWeights()
@@ -196,7 +206,7 @@ def init():
 	global abbrs_re
 	abbrs_re = utils.load_abbreviations_re()
 
-	numpy.set_printoptions(edgeitems=100)
+	np.set_printoptions(edgeitems=100)
 
 def view_weights(model, name=None):
 	if name == None:
@@ -227,15 +237,15 @@ def track_add(track_list, name, layer):
 class SaveWeights(keras.callbacks.Callback):
 	def on_epoch_end(self, epoch, logs={}):
 		global last_epoch_time
-		sleep(.5)
 		if time.time()-last_epoch_time > save_weight_secs:
 			last_epoch_time = time.time()
-			pf("Saving weights, timed (", save_weight_secs, "s).  Time elapsed: ",
+			pf("\nSaving weights, timed (", save_weight_secs, "s).  Time elapsed: ",
 					int(time.time()-start_time), "s.  Fit time elapsed: ",
 					int(time.time()-fit_start_time), "s.",
 					sep=''
 				)
 			save_weights(model, weight_store_txt)
+		sleep(2)
 		return
 
 def show_shape(inputs, x, predict=False):
@@ -246,19 +256,19 @@ def show_shape(inputs, x, predict=False):
 	model.summary()
 	pf("/MODEL SUMMARY:")
 	if predict:
-		dummy_input = numpy.ones((1,window,1), dtype='float32')
+		dummy_input = np.ones((1,window,1), dtype='float32')
 		pf("MODEL PREDICT: ",)
 		preds = model.predict(dummy_input)
 		pf(preds.shape)
 		pf("/MODEL PREDICT:")
 
-def model():
+def make_model():
 	global actouts
 	act='sigmoid'
 	trackers=[]
 	leakalpha=.2
 
-	x = inputs = Input(shape=(window, 1), name='gen_input', dtype='float32')
+	x = inputs = Input(shape=(window,), name='gen_input', dtype='float32')
 	#track_add(trackers, 'gen_input', x)
 	#x = Flatten()(x)
 	#x = Dense(4096)(x)
@@ -269,13 +279,17 @@ def model():
 	f=10
 	if True:
 		#x = LeakyReLU(alpha=leakalpha)(x)
-		charset_in=256   # latin-1?
-		charset_out=62  # Enough?
-		x = Reshape((window,))(x)
+		charset_in=80   # latin-1?
+		charset_out=42  # Enough?
+		#x = Reshape((window,))(x)
 		x = Embedding(charset_in, charset_out, input_length=window)(x)
-		x = LSTM(window*charset_out, dropout=0.2, recurrent_dropout=0.2)(x)
+		x = LSTM(window*charset_out*2,
+			dropout=0.0,
+			recurrent_dropout=0.0,
+			return_sequences=True,
+			)(x)
 		x = Dense(window)(x)
-		x = Dense(window, activation='tanh')(x)
+		x = Dense(window, activation='sigmoid')(x)
 		#x = LeakyReLU(alpha=.2)(x)
 		#x = Reshape((window,))(x)
 #		x = convleaky(x, 50, 1, track_list=trackers, name='c1_1')    # 80
@@ -307,20 +321,21 @@ def model():
 	actmodels = Model(inputs=[inputs], outputs=actlayers)
 	lrate = lrate_enh_start
 	epochs = epochs_txt
-	decay = .01/epochs
+	decay = 10/epochs
+	decay = 0
 	adam_opt_gen=Adam(lr=lrate, beta_1=0.9, beta_2=0.999, epsilon=1e-08, decay=decay)
 	opt = 'sgd'
 	opt = adam_opt_gen
-	loss = 'binary_crossentropy'
 	loss = 'categorical_crossentropy'
+	loss = 'binary_crossentropy'
 
 	pf("Actmodels Model:", actmodels)
 	actmodels.compile(
 			loss=loss,
 			loss_weights=actlosses,
 			optimizer=opt,
-			#metrics=['accuracy'],
-			metrics=['categorical_accuracy'],
+			metrics=['accuracy'],
+			#metrics=['categorical_accuracy'],
 		)
 
 	#pf("final prediction: ", sep='', end=''); show_shape(inputs, x)
@@ -330,28 +345,72 @@ def model():
 
 	#model.compile(loss='mean_squared_error', optimizer=opt, metrics=['accuracy'])
 
+	pf(actmodels.summary())
 	pf("Loading weights")
 	if load_weights and isfile(weight_store_txt):
 		pf("Loading weights")
 		actmodels.load_weights(weight_store_txt)
-	pf(actmodels.summary())
 	return actmodels
 
 def arr1_to_sentence(a):
-	#return (a*255).astype(numpy.uint8).tostring()
-	return a.astype(numpy.uint8).tostring()
+	#return (a*255).astype(np.uint8).tostring()
+	return a.astype(np.uint8).tostring()
 
-def train(model=None, itercount=0):
+def show_pred(model=None, generator=None, steps=1):
+	xs,ygs = np.asarray(zip(*[next(generator) for i in range(0, steps)]))
+	pdb.set_trace()
+	ys = model.predict(xs, steps=steps, verbose=0)
+	# pred[2] is the 3rd output: c1_2
+	# pred[2][0] is the first sample (of the batch)'s output
+	# pred[2][0][i] is the first sample output's letter i
+	# pred[2][0][i][0] is letter's conv filter (there are f = 100)
+	#pf("Pred len:", len(pred))
+	#pf("Pred[0] shape (output layer):", pred[0].shape)
+	#pf("Pred[1] shape:", pred[1].shape)
+	#pf("Pred[2] shape:", pred[2].shape)
+	for i in range(0, steps):
+		x = xs[i]
+		yg = ygs[i]
+		y = ys[i]
+		pfp(bred, "\n  Pred original sentence w/punct: {{", bcya, yg[0], bred, "}}", rst)
+		s = arr1_to_sentence(x[0])
+		pfp(bred,   "       Pred sentence 4 input (x): {{", bgre, s, bred, "}}", rst)
+	
+		#lyr_c1_1_out = pred[2][0] # Output#2, for the first of batch (0)
+		#for f in range(len(lyr_c1_1_out[0])):  # f = 0..filter count
+		#	lyr_c1_1_out = pred[2][0] # Output#2, for the first of batch (0)
+		#	ltr_values = lyr_c1_1_out[:,f]
+		#	str_colorize(s, ltr_values, aseq_gb)
+	
+		#pdb.set_trace()
+		pfpl("  Y gndtrth : ")
+		[ pfpl(n) for n in y[0][0].astype(np.uint8)]
+		pf("")
+		pfpl("  Y pred    : ")
+		#pf(pred[0])
+		[ pfpl(n) for n in (pred[0]>.8).astype(np.uint8)]
+		pf("")
+		for loc in range(len(pred[0])-1, -1, -1):
+			#pf("pred loc:", loc)
+			#pf("pred[0] len:", len(pred[0][0]))
+			#pf("pred[0]:", pred[0][0])
+			val = int(pred[0][int(loc)]+.2)  # Add .2 for "close to 1 (true)"
+			if val: # true == insert space
+				s = s[:loc+1] + '/' + s[loc+2:] # use if replacing
+				#s = s[:loc+1] + '/' + s[loc+1:] # use if inserting
+		pfp(yel, "    Y sentence (breaks inserted): {{", whi, s, yel, "}}", rst)
+
+def run_train(model=None, train_pred_iters=0):
 	preview = True if args.viewfirst else False
 	preview = True
 	do_train = False
 	do_train = True
-	#if 1 or (itercount>0 or preview):
-	#if 0 and (itercount>0 or preview):
-	if itercount>0 or preview:
-		generator = generate_texts_rnd('test')
-		for i in range(0,5):
-			x, y = next(generator)
+	#if 1 or (train_pred_iters>0 or preview):
+	#if 0 and (train_pred_iters>0 or preview):
+	if train_pred_iters>0 or preview:
+		#show_pred(model=model, generator=test_generator, steps=200)
+		for i in range(0,200):
+			x, y = next(test_generator)
 			#pf(bred, "X is ", x, rst)
 			#pf(bred, "Y is ", y, rst)
 			pred = model.predict(x, batch_size=1, verbose=0)
@@ -365,9 +424,9 @@ def train(model=None, itercount=0):
 			#pf("Pred[1] shape:", pred[1].shape)
 			#pf("Pred[2] shape:", pred[2].shape)
 
-			pfp("\n  Pred sentence w/punct:\n", glob_last_wpunct)
+			pfp(bred, "\n  Pred original sentence w/punct: {{", bcya, glob_last_wpunct, bred, "}}", rst)
 			s = arr1_to_sentence(x[0])
-			pfp("  Pred sentence input (x):\n", s)
+			pfp(bred,   "       Pred sentence 4 input (x): {{", bgre, s, bred, "}}", rst)
 
 			#lyr_c1_1_out = pred[2][0] # Output#2, for the first of batch (0)
 			#for f in range(len(lyr_c1_1_out[0])):  # f = 0..filter count
@@ -375,13 +434,18 @@ def train(model=None, itercount=0):
 			#	ltr_values = lyr_c1_1_out[:,f]
 			#	str_colorize(s, ltr_values, aseq_gb)
 
+			#pdb.set_trace()
 			pfpl("  Y gndtrth : ")
-			[ pfpl(n) for n in y[0][0].astype(numpy.uint8)]
+			[ pfpl(n) for n in y[0][0].astype(np.uint8)]
+			pf("")
 
+			pdb.set_trace()
 			pfpl("  Y pred    : ")
 			#pf(pred[0])
-			#[ pfpl(n) for n in pred[0][0].astype(numpy.uint8)]
-			#pf("")
+			[ pfpl(n) for n in (pred[0]>.8).astype(np.uint8)]
+			pf("")
+			[ pfpl(n) for n in pred[0].astype(np.uint8)]
+			pf("")
 
 			for loc in range(len(pred[0])-1, -1, -1):
 				#pf("pred loc:", loc)
@@ -391,10 +455,11 @@ def train(model=None, itercount=0):
 				if val: # true == insert space
 					s = s[:loc+1] + '/' + s[loc+2:] # use if replacing
 					#s = s[:loc+1] + '/' + s[loc+1:] # use if inserting
-			#pfp("  Y sentence (breaks inserted):\n", s)
+			pfp(yel, "    Y sentence (breaks inserted): {{", whi, s, yel, "}}", rst)
+			#pdb.set_trace()
 
-			#for off in ((pred[0]*window).astype(numpy.int8)[::-1]):
-			#for off in ((pred[0]*window).astype(numpy.int8)):
+			#for off in ((pred[0]*window).astype(np.int8)[::-1]):
+			#for off in ((pred[0]*window).astype(np.int8)):
 				#for off in (pred[0]):
 				#pf(" . at", off)
 
@@ -407,20 +472,17 @@ def train(model=None, itercount=0):
 		fit_start_time = time.time()
 		last_epoch_time = time.time()
 
-		generator = generate_texts_rnd('train')
-		generator_val = generate_texts_rnd('val')
-
 		pf("Total snippets:", total_sets)
 		pf("Total snippets w/ punc:", total_wpunc)
 		pf("Total snippets w/o punc:", total_wopunc)
 		pf("Calling fit_generator")
 		pf("Model:", model)
 		model.fit_generator(
-				generator,
+				train_generator,
 				steps_per_epoch=samp_per_epoch_txt,
 				epochs=epochs_txt,
 				verbose=2,
-				validation_data=generator_val,
+				validation_data=val_generator,
 				validation_steps=30,
 				callbacks=[checkpoint_epoch],
 			)
@@ -433,8 +495,9 @@ def save_weights(model, fn):
 
 def prep_snippet_in(s):
 	global glob_last_wpunct
+	lo_snipverbose = snipverbose if randint(0,100) > 99 else 0
 	ext = 1.0 # Extend view ratio: ex. 1.2 to see a bit more sentence
-	if snipverbose > 1: pfp("String: {{", whi, s, rst, "}}")
+	if lo_snipverbose > 1: pfp("String: {{", whi, s, rst, "}}")
 	origs = s
 	# p = re.compile('^\w+\W'); s = p.sub("", s)  # Strip initial word (part)
 	# p = re.compile('^\W+\s*'); s = p.sub("", s)  # Strip non-word chars
@@ -447,7 +510,7 @@ def prep_snippet_in(s):
 	## ABBREVIATION'S PERIODS GET WHITED OUT
 	s = abbrs_re.sub('\\1 ', s)        #   clear . after abbreviations
 	#pfp(" After: {{", yel, s, rst, "}}")
-	if snipverbose > 0:
+	if lo_snipverbose > 0:
 		pfp("       W punct: {{", bcya, s, rst, "}}")
 	
 	#####################################
@@ -469,13 +532,13 @@ def prep_snippet_in(s):
 	# Find and store punctuation offsets
 	p = re.compile('[.!?]')
 	starts = [i for i in p.finditer(s)]
-	y = numpy.zeros(window)
+	y = np.zeros(window)
 	i=0
 	start_idx = []
 	for start in (starts):
 		st = start.start()
 		if st < window:
-			if snipverbose > 1: pf("  Punc found at:", st-i)
+			if lo_snipverbose > 1: pf("  Punc found at:", st-i)
 			start_idx.append(st-i)
 			y[st-1] = 1.0
 			#i += 1
@@ -488,39 +551,40 @@ def prep_snippet_in(s):
 		total_wopunc += 1
 	# White-out that earlier match (the EOL punctuation)
 	s = re.sub(r'[.?!]', " ", s) # I think by now we only have periods, but whatevz
-	if snipverbose:
+	if lo_snipverbose > 1:
 		pfp(" X (w/o punct): {{", yel, s, rst, "}}") # crop 4 display
 	s = s[0:window]
 	s = s.ljust(window)  # pad with spaces
 	
-	if snipverbose > 0: pfp("         After: {{", yel, s, rst, "}}")
-	s = numpy.fromstring(s, dtype='uint8') # need int8 here to get the chars one at a time
-	s = s.astype(numpy.float32)
+	if lo_snipverbose > 1: pfp("         After: {{", yel, s, rst, "}}")
+	s = np.fromstring(s, dtype='uint8') # need int8 here to get the chars one at a time
+	s = s.astype(np.float32)
 	#s = s/255
 	#pf("s scaled:", s)
-	s = s.reshape((1,) + s.shape + (1,))
+	#s = s.reshape((1,) + s.shape + (1,))
+	s = s.reshape((1,) + s.shape)
 	start_idx = start_idx[:punk_max]
 	start_idx.extend([0] * (punk_max - len(start_idx)))
-	start_idx = numpy.asarray(start_idx, dtype='float32')
+	start_idx = np.asarray(start_idx, dtype='float32')
 	#pf("Cleaned S:", yel, cleans[:140], rst)
-	#if snipverbose: pf("Indexes       :", start_idx)
+	#if lo_snipverbose: pf("Indexes       :", start_idx)
 	start_idx = start_idx / window
 	#pf("Indexes scaled:", start_idx)
 	start_idx = start_idx.reshape((1,punk_max))
 	#pf("Orig S:", bgre, origs[:150], rst)
 	#pf("Punk locs::", bcya, start_idx, rst)
 	#pf("shhh", start_idx.shape)
-	#if snipverbose: pf("")
+	#if lo_snipverbose: pf("")
 	#return s, start_idx
 	y = y.reshape((1,window))
-	#if snipverbose: pf("String        :", s)
-	if snipverbose: pf("Y            :", y)
-	#if snipverbose: pf("Indexes shape :", y.shape)
+	#if lo_snipverbose: pf("String        :", s)
+	if lo_snipverbose: pf("Y            :", y)
+	#if lo_snipverbose: pf("Indexes shape :", y.shape)
 	y = [ y,
-		#numpy.zeros((1,80,1)),
-		#numpy.zeros((1,80,50)),
-		#numpy.zeros((1,80,50)),
-		#numpy.zeros((1,80,10))
+		#np.zeros((1,80,1)),
+		#np.zeros((1,80,50)),
+		#np.zeros((1,80,50)),
+		#np.zeros((1,80,10))
 	]
 	return s, y, len(starts)
 def get_snippet(fn, rand=False, offset=None, window=None):
@@ -606,35 +670,56 @@ def generate_texts_flow(setname): # setname='train','val','test'
 			#pf("Ys:", y.shape)
 		yield x, y
 
-def generate_texts_rnd(setname): # setname='train','val','test'
+def generate_texts_rnd(setname, punctonly=False, model=None):
+	# setname: 'train', 'test', 'val'
+	# punctonly: Usually for 'val' set: Skip samples without punctuation
+	# model: reference to model, for model.reset_states()
 	global lastfname
 	restart = 1
 	offset = 0 # We currently start at the beginning each time we change files
 	flen = None
+	totsamps_b4_reset = 0
 	while True:
 		if restart:
+			totsamps = 0
 			iset = txtsets[setname]
 			iidx = randint(0, len(iset)-1)
 			restart = 0
+			model.reset_states()
+			pfp("\n", bcya, "Choosing new file (set:",
+				yel, setname,
+				bcya, ": ",
+				whi, iset[iidx], rst)
+			offset = 0
 		else:
-			offset += slide
-			if offset >= flen-window:
+			offset += window_stride
+			if offset >= flen-window or totsamps > reset_at_samps:
 				restart = 1
 				continue
+			if totsamps_b4_reset >= reset_at_samps:
+				model.reset_states()
+				totsamps_b4_reset = 0
+		totsamps_b4_reset += 1
+
 		lastfname = iset[iidx]
-		x, y, punccnt, flen = \
+		x, y, punccnt, flen, offset = \
 			get_snippet(lastfname, offset=offset, window=window)
-		#if punccnt > 2:
-			#pf("X:", x)
-			#pf("Y:", y)
-			#pf("Ys:", y.shape)
+		#if punctonly and punccnt < 1: continue
+		# if punccnt > 0:
+		# 	pf("X:", x)
+		# 	pf("Y:", y)
+		# 	pf("Ys:", y.shape)
 		yield x, y
 
 init()
-model = model()
+model = make_model()
+train_generator = generate_texts_rnd('train', punctonly=False, model=model)
+test_generator = generate_texts_rnd('test', punctonly=False, model=model)
+val_generator = generate_texts_rnd('val', punctonly=False, model=model)
+#pdb.set_trace()
 
-for i in xrange(iters):
-	train(model=model, itercount=i)
+for i in xrange(train_pred_iters):
+	run_train(model=model, train_pred_iters=i)
 
 #if not args.hyperenh:
 #unbents, flats = zip(itertools.islice(gen_img_enh_pair('test'), 100))
