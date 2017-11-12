@@ -9,7 +9,7 @@ from hyperas.distributions import choice, uniform, conditional
 import keras
 import errno
 from keras.models import Sequential, Model
-from keras.layers import Dense, Reshape, UpSampling2D, Flatten, Conv1D, MaxPooling1D, Input, ZeroPadding1D, Activation, Dropout, Embedding, Permute, LSTM
+from keras.layers import Dense, Reshape, UpSampling2D, Flatten, Conv1D, MaxPooling1D, Input, ZeroPadding1D, Activation, Dropout, Embedding, Permute, LSTM, TimeDistributed
 from keras.layers.merge import Concatenate
 #from keras.layers import Deconvolution2D
 from keras.preprocessing.image import ImageDataGenerator, array_to_img, img_to_array, load_img
@@ -35,12 +35,15 @@ import utils # get_filelen load_abbreviations_re():
 import cPickle as pickle
 import os
 import ipdb as pdb
-debug=1
+
+debug=0
 
 #from seya.layers.attention import SpatialTransformer, ST2
 snipverbose = 2
 snipverbose = 0
 snipverbose = 1
+
+eol_truth_value=1.0
 
 train_generator = test_generator = val_generator = None
 
@@ -98,13 +101,13 @@ save_weight_secs = 20
 start_time = time.time()
 abbrs_re = None # regex for abbreviations
 
-lrate_enh_start = 0.0001
-epochs_txt = 20
+lrate_enh_start = 0.00005
+epochs_txt = 5
 samp_per_epoch_txt = 3000
 train_pred_iters = 200                   # 
 
 if debug:
-	lrate_enh_start = 0.000001
+	lrate_enh_start = 0.0001
 	epochs_txt = 4
 	samp_per_epoch_txt = 300
 
@@ -268,7 +271,11 @@ def make_model():
 	trackers=[]
 	leakalpha=.2
 
-	x = inputs = Input(shape=(window,), name='gen_input', dtype='float32')
+	x = inputs = Input(
+		shape=(window,),
+		name='gen_input',
+		dtype='float32',
+		batch_shape=(1,window))
 	#track_add(trackers, 'gen_input', x)
 	#x = Flatten()(x)
 	#x = Dense(4096)(x)
@@ -287,9 +294,11 @@ def make_model():
 			dropout=0.0,
 			recurrent_dropout=0.0,
 			return_sequences=True,
+			stateful=True,
 			)(x)
-		x = Dense(window)(x)
-		x = Dense(window, activation='sigmoid')(x)
+		x = TimeDistributed(Dense(1))(x)
+		x = TimeDistributed(Dense(1, activation='sigmoid'))(x)
+		x = Reshape((window,))(x)
 		#x = LeakyReLU(alpha=.2)(x)
 		#x = Reshape((window,))(x)
 #		x = convleaky(x, 50, 1, track_list=trackers, name='c1_1')    # 80
@@ -357,8 +366,7 @@ def arr1_to_sentence(a):
 	return a.astype(np.uint8).tostring()
 
 def show_pred(model=None, generator=None, steps=1):
-	xs,ygs = np.asarray(zip(*[next(generator) for i in range(0, steps)]))
-	pdb.set_trace()
+	xs,ygs,sampweights = np.asarray(zip(*[next(generator) for i in range(0, steps)]))
 	ys = model.predict(xs, steps=steps, verbose=0)
 	# pred[2] is the 3rd output: c1_2
 	# pred[2][0] is the first sample (of the batch)'s output
@@ -403,14 +411,16 @@ def show_pred(model=None, generator=None, steps=1):
 def run_train(model=None, train_pred_iters=0):
 	preview = True if args.viewfirst else False
 	preview = True
-	do_train = False
 	do_train = True
+	do_train = False
 	#if 1 or (train_pred_iters>0 or preview):
 	#if 0 and (train_pred_iters>0 or preview):
 	if train_pred_iters>0 or preview:
 		#show_pred(model=model, generator=test_generator, steps=200)
 		for i in range(0,200):
-			x, y = next(test_generator)
+			x, yg, sampweight = next(test_generator)
+
+			if glob_last_wpunct.find('.') < 0: continue
 			#pf(bred, "X is ", x, rst)
 			#pf(bred, "Y is ", y, rst)
 			pred = model.predict(x, batch_size=1, verbose=0)
@@ -436,22 +446,22 @@ def run_train(model=None, train_pred_iters=0):
 
 			#pdb.set_trace()
 			pfpl("  Y gndtrth : ")
-			[ pfpl(n) for n in y[0][0].astype(np.uint8)]
+
+			[ pfpl(n) for n in yg[0][0].astype(np.uint8)]
 			pf("")
 
-			pdb.set_trace()
+			pred_punct_locs = pred[0]
 			pfpl("  Y pred    : ")
 			#pf(pred[0])
-			[ pfpl(n) for n in (pred[0]>.8).astype(np.uint8)]
+			[ pfpl(n) for n in (pred_punct_locs>.7).astype(np.uint8)]
 			pf("")
-			[ pfpl(n) for n in pred[0].astype(np.uint8)]
-			pf("")
+			pf("  Y Actual  :", pred_punct_locs )
 
-			for loc in range(len(pred[0])-1, -1, -1):
+			for loc in range(len(pred_punct_locs)-1, -1, -1):
 				#pf("pred loc:", loc)
 				#pf("pred[0] len:", len(pred[0][0]))
 				#pf("pred[0]:", pred[0][0])
-				val = int(pred[0][int(loc)]+.2)  # Add .2 for "close to 1 (true)"
+				val = int(pred_punct_locs[int(loc)]+.2)  # Add .2 for "close to 1 (true)"
 				if val: # true == insert space
 					s = s[:loc+1] + '/' + s[loc+2:] # use if replacing
 					#s = s[:loc+1] + '/' + s[loc+1:] # use if inserting
@@ -495,7 +505,7 @@ def save_weights(model, fn):
 
 def prep_snippet_in(s):
 	global glob_last_wpunct
-	lo_snipverbose = snipverbose if randint(0,100) > 99 else 0
+	lo_snipverbose = snipverbose if randint(0,1000) > 995 else 0
 	ext = 1.0 # Extend view ratio: ex. 1.2 to see a bit more sentence
 	if lo_snipverbose > 1: pfp("String: {{", whi, s, rst, "}}")
 	origs = s
@@ -540,7 +550,7 @@ def prep_snippet_in(s):
 		if st < window:
 			if lo_snipverbose > 1: pf("  Punc found at:", st-i)
 			start_idx.append(st-i)
-			y[st-1] = 1.0
+			y[st-1] = eol_truth_value
 			#i += 1
 			break # only using 1 right now
 	global total_sets, total_wpunc, total_wopunc
@@ -702,14 +712,15 @@ def generate_texts_rnd(setname, punctonly=False, model=None):
 		totsamps_b4_reset += 1
 
 		lastfname = iset[iidx]
-		x, y, punccnt, flen, offset = \
+		x, y, punccnt, flen = \
 			get_snippet(lastfname, offset=offset, window=window)
 		#if punctonly and punccnt < 1: continue
 		# if punccnt > 0:
 		# 	pf("X:", x)
 		# 	pf("Y:", y)
 		# 	pf("Ys:", y.shape)
-		yield x, y
+		sampweight = .01 if punccnt < 1 else 1
+		yield x, y, np.asarray([sampweight])
 
 init()
 model = make_model()
